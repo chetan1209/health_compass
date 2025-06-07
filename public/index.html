@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Health Compass - Medical Documentation Assistant</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 10px 0;
+        }
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .recording {
+            color: #ff0000;
+            font-weight: bold;
+        }
+        #transcript, #results {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            min-height: 100px;
+            white-space: pre-wrap;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .transcribing {
+            background-color: #d9edf7;
+            color: #31708f;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Health Compass</h1>
+        <h2>Medical Documentation Assistant</h2>
+        
+        <div>
+            <button id="recordButton" class="button">Start Recording</button>
+            <button id="stopButton" class="button" disabled>Stop Recording</button>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <h3>Live Transcript:</h3>
+        <div id="transcript"></div>
+        
+        <h3>Processed Information:</h3>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let recognition;
+        let finalTranscript = '';  // Store complete transcript
+        const recordButton = document.getElementById('recordButton');
+        const stopButton = document.getElementById('stopButton');
+        const status = document.getElementById('status');
+        const transcript = document.getElementById('transcript');
+        const results = document.getElementById('results');
+
+        // Initialize speech recognition
+        if ('webkitSpeechRecognition' in window) {
+            recognition = new webkitSpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const transcript = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        finalTranscript += transcript + ' ';  // Add to complete transcript
+                    } else {
+                        interimTranscript += transcript;
+                    }
+                }
+
+                // Update the transcript div with both final and interim results
+                transcript.innerHTML = finalTranscript + '<i style="color: #999;">' + interimTranscript + '</i>';
+            };
+
+            recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                status.innerHTML = `Error: ${event.error}`;
+                status.className = 'status error';
+            };
+
+            // Handle when recognition ends
+            recognition.onend = () => {
+                if (recordButton.disabled) {  // If we're still recording
+                    recognition.start();  // Restart recognition
+                }
+            };
+        } else {
+            console.error('Speech recognition not supported');
+            status.innerHTML = 'Speech recognition not supported in this browser';
+            status.className = 'status error';
+        }
+
+        recordButton.addEventListener('click', async () => {
+            try {
+                finalTranscript = '';  // Reset transcript when starting new recording
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob);
+
+                    try {
+                        status.innerHTML = 'Processing recording...';
+                        status.className = 'status transcribing';
+                        
+                        // Use the accumulated finalTranscript
+                        const processResponse = await fetch('/api/process-text', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ text: finalTranscript })
+                        });
+                        
+                        const processData = await processResponse.json();
+                        if (processResponse.ok) {
+                            results.textContent = processData.processedData;
+                            status.innerHTML = 'Processing complete!';
+                            status.className = 'status success';
+                        } else {
+                            throw new Error(processData.error);
+                        }
+                    } catch (error) {
+                        status.innerHTML = `Error: ${error.message}`;
+                        status.className = 'status error';
+                    }
+                };
+
+                audioChunks = [];
+                mediaRecorder.start();
+                recognition.start();
+                recordButton.disabled = true;
+                stopButton.disabled = false;
+                status.innerHTML = 'Recording and transcribing...';
+                status.className = 'status recording';
+            } catch (error) {
+                status.innerHTML = `Error: ${error.message}`;
+                status.className = 'status error';
+            }
+        });
+
+        stopButton.addEventListener('click', () => {
+            mediaRecorder.stop();
+            recognition.stop();
+            recordButton.disabled = false;
+            stopButton.disabled = true;
+            status.innerHTML = 'Processing recording...';
+            status.className = 'status transcribing';
+        });
+    </script>
+</body>
+</html> 
