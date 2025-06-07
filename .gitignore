@@ -9,6 +9,9 @@ yarn-error.log
 .env.local
 .env.*.local
 
+# Google Cloud Service Account Key (IMPORTANT: DO NOT COMMIT THIS FILE)
+health-compass-transcriber-b6e6957327e6.json
+
 # IDE
 .idea/
 .vscode/

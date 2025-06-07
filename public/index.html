@@ -92,6 +92,21 @@
         const transcript = document.getElementById('transcript');
         const results = document.getElementById('results');
 
+        let recognitionTimeoutId;
+        const RECOGNITION_TIMEOUT_MS = 8000; // Restart recognition if no results for 8 seconds
+
+        function resetRecognitionTimeout() {
+            if (recognitionTimeoutId) {
+                clearTimeout(recognitionTimeoutId);
+            }
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                recognitionTimeoutId = setTimeout(() => {
+                    console.log('Recognition timeout: Forcing restart of webkitSpeechRecognition.');
+                    recognition.stop(); // onend will handle the restart logic
+                }, RECOGNITION_TIMEOUT_MS);
+            }
+        }
+
         // Initialize speech recognition
         if ('webkitSpeechRecognition' in window) {
             recognition = new webkitSpeechRecognition();
@@ -99,15 +114,21 @@
             recognition.interimResults = true;
             recognition.lang = 'en-US';
 
+            recognition.onstart = () => {
+                console.log('Speech recognition started.');
+                resetRecognitionTimeout();
+            };
+
             recognition.onresult = (event) => {
+                resetRecognitionTimeout(); // Reset timeout on every new result
                 let interimTranscript = '';
 
                 for (let i = event.resultIndex; i < event.results.length; i++) {
-                    const transcript = event.results[i][0].transcript;
+                    const currentTranscript = event.results[i][0].transcript;
                     if (event.results[i].isFinal) {
-                        finalTranscript += transcript + ' ';  // Add to complete transcript
+                        finalTranscript += currentTranscript + ' ';  // Add to complete transcript
                     } else {
-                        interimTranscript += transcript;
+                        interimTranscript += currentTranscript;
                     }
                 }
 
@@ -119,12 +140,33 @@
                 console.error('Speech recognition error:', event.error);
                 status.innerHTML = `Error: ${event.error}`;
                 status.className = 'status error';
+                clearTimeout(recognitionTimeoutId); // Clear timeout on error
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    console.log('Error occurred, but MediaRecorder is active. Attempting to restart speech recognition.');
+                    try {
+                        recognition.start(); // onend might fire after this, handling subsequent restart
+                    } catch (e) {
+                        console.error('Error restarting speech recognition after error:', e);
+                    }
+                }
             };
 
             // Handle when recognition ends
             recognition.onend = () => {
-                if (recordButton.disabled) {  // If we're still recording
-                    recognition.start();  // Restart recognition
+                console.log('Speech recognition ended.');
+                clearTimeout(recognitionTimeoutId); // Clear timeout as it ended
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    console.log('MediaRecorder is still active, restarting speech recognition.');
+                    // Add a small delay to avoid rapid restarts that might overwhelm the browser
+                    setTimeout(() => {
+                        try {
+                            recognition.start();
+                        } catch (e) {
+                            console.error('Error restarting speech recognition onend:', e);
+                        }
+                    }, 500); // 500ms delay
+                } else {
+                    console.log('MediaRecorder is not active. Not restarting speech recognition.');
                 }
             };
         } else {
@@ -136,6 +178,8 @@
         recordButton.addEventListener('click', async () => {
             try {
                 finalTranscript = '';  // Reset transcript when starting new recording
+                transcript.innerHTML = ''; // Clear visual transcript
+                results.textContent = ''; // Clear processed results
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorder = new MediaRecorder(stream);
                 
@@ -144,7 +188,7 @@
                 };
 
                 mediaRecorder.onstop = async () => {
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' }); // Changed to webm for compatibility
                     const formData = new FormData();
                     formData.append('audio', audioBlob);
 
@@ -153,17 +197,50 @@
                         status.className = 'status transcribing';
                         
                         // Use the accumulated finalTranscript
-                        const processResponse = await fetch('/api/process-text', {
+                        const processResponse = await fetch('/api/upload-audio', {
                             method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({ text: finalTranscript })
+                            // Removed 'Content-Type': 'application/json' - FormData sets its own
+                            body: formData // Send the FormData object directly
                         });
                         
                         const processData = await processResponse.json();
                         if (processResponse.ok) {
-                            results.textContent = processData.processedData;
+                            // Display the transcription from the server (Google Cloud)
+                            transcript.textContent = processData.transcription;
+
+                            // Display processed data and validated terms
+                            let resultsContent = `Summary:\n${processData.processedData}\n\n`;
+                            
+                            if (processData.validatedTerms && processData.validatedTerms.medications.length > 0) {
+                                resultsContent += 'Validated Medications:\n';
+                                processData.validatedTerms.medications.forEach(med => {
+                                    resultsContent += `- Original: ${med.original}\n`;
+                                    if (med.validated && med.validated.length > 0) {
+                                        med.validated.forEach(vMed => {
+                                            resultsContent += `  (RxCUI: ${vMed.rxcui || 'N/A'}, Name: ${vMed.name || 'N/A'})\n`;
+                                        });
+                                    } else {
+                                        resultsContent += '  (No validation found)\n';
+                                    }
+                                });
+                                resultsContent += '\n';
+                            }
+
+                            if (processData.validatedTerms && processData.validatedTerms.conditions.length > 0) {
+                                resultsContent += 'Validated Conditions:\n';
+                                processData.validatedTerms.conditions.forEach(cond => {
+                                    resultsContent += `- Original: ${cond.original}\n`;
+                                    if (cond.validated && cond.validated.length > 0) {
+                                        cond.validated.forEach(vCond => {
+                                            resultsContent += `  (SNOMED CT ID: ${vCond.conceptId || 'N/A'}, Term: ${vCond.term || 'N/A'})\n`;
+                                        });
+                                    } else {
+                                        resultsContent += '  (No validation found)\n';
+                                    }
+                                });
+                            }
+
+                            results.textContent = resultsContent;
                             status.innerHTML = 'Processing complete!';
                             status.className = 'status success';
                         } else {
@@ -182,6 +259,7 @@
                 stopButton.disabled = false;
                 status.innerHTML = 'Recording and transcribing...';
                 status.className = 'status recording';
+                resetRecognitionTimeout(); // Start timeout as soon as recording starts
             } catch (error) {
                 status.innerHTML = `Error: ${error.message}`;
                 status.className = 'status error';
@@ -190,11 +268,12 @@
 
         stopButton.addEventListener('click', () => {
             mediaRecorder.stop();
-            recognition.stop();
+            recognition.stop(); // Stop webkitSpeechRecognition explicitly
             recordButton.disabled = false;
             stopButton.disabled = true;
             status.innerHTML = 'Processing recording...';
             status.className = 'status transcribing';
+            clearTimeout(recognitionTimeoutId); // Clear timeout when stopped manually
         });
     </script>
 </body>
